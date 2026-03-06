@@ -6,7 +6,24 @@ import { resumeSchema } from '@/lib/resume/types'
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
+// pdfjs-dist (used by pdf-parse) requires browser globals that don't exist in Node.js
+// Polyfill them before any pdf-parse import/call
+function polyfillBrowserGlobals() {
+  const g = globalThis as any
+  if (!g.DOMMatrix) {
+    g.DOMMatrix = class DOMMatrix {
+      constructor() {
+        return new Proxy(this, { get: (_t, p) => (typeof p === 'string' && p !== 'then' ? 0 : undefined) })
+      }
+    }
+  }
+  if (!g.Path2D) g.Path2D = class Path2D { moveTo() {} lineTo() {} closePath() {} }
+  if (!g.ImageData) g.ImageData = class ImageData { constructor(w: number, h: number) { Object.assign(this, { width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }) } }
+  if (!g.document) g.document = { createElement: () => ({ getContext: () => null }) }
+}
+
 async function extractTextFromPdf(buffer: Buffer): Promise<string> {
+  polyfillBrowserGlobals()
   // Dynamic import avoids pdf-parse's test-file read on module init (Next.js compat)
   const pdfParseModule = (await import('pdf-parse')) as any
   const pdfParse = pdfParseModule.default ?? pdfParseModule
