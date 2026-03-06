@@ -7,45 +7,46 @@ import { optimizeResumePrompt } from '@/lib/ai/prompts/optimizeResume'
 import { addProjectsPrompt } from '@/lib/ai/prompts/addProjects'
 import { coverLetterPrompt } from '@/lib/ai/prompts/coverLetter'
 import { jobFitPrompt } from '@/lib/ai/prompts/jobFit'
+import { alignmentAnalysisPrompt } from '@/lib/ai/prompts/alignmentAnalysis'
+import { atsAuditPrompt } from '@/lib/ai/prompts/atsAudit'
+import { atsKeywordsPrompt } from '@/lib/ai/prompts/atsKeywords'
+import { taskAuditPrompt } from '@/lib/ai/prompts/taskAudit'
+import { gapAnalysisPrompt } from '@/lib/ai/prompts/gapAnalysis'
+import { howDevPrompt } from '@/lib/ai/prompts/howDev'
+import { coverLetterHighlightsPrompt } from '@/lib/ai/prompts/coverLetterHighlights'
+import { coverLetterDraftPrompt } from '@/lib/ai/prompts/coverLetterDraft'
+import { interviewQuestionsPrompt } from '@/lib/ai/prompts/interviewQuestions'
+import { questionsToAskPrompt } from '@/lib/ai/prompts/questionsToAsk'
+import { informationalInterviewPrompt } from '@/lib/ai/prompts/informationalInterview'
 
-const actionSchema = z.enum(['adjust', 'optimize', 'addProjects', 'coverLetter', 'fit'])
+const actionSchema = z.enum([
+  'adjust', 'optimize', 'addProjects', 'coverLetter', 'fit',
+  'alignment', 'atsAudit', 'atsKeywords', 'taskAudit', 'gapAnalysis', 'howDev',
+  'clHighlights', 'clDraft',
+  'interviewQuestions', 'questionsToAsk', 'informationalInterview',
+])
 
 const requestSchema = z.object({
   action: actionSchema,
   jobDescription: z.string().optional().default(''),
-  resume_data: z.unknown(),
+  resume_data: z.unknown().optional(),
+  extra: z.unknown().optional(),
 })
 
+// Partial-output schemas — AI returns only editable sections, server merges with frozen data
 const adjustResponseSchema = z.object({
-  resume_data: z.unknown(),
-  changes: z.array(z.string()).optional().default([]),
+  workExperience: z.array(z.any()),
+  projects: z.array(z.any()),
   warnings: z.array(z.string()).optional().default([]),
-  missing_info_questions: z.array(z.string()).optional().default([]),
 })
 
 const optimizeResponseSchema = z.object({
-  resume_data: z.unknown(),
-  changes: z.array(z.string()).optional().default([]),
-  warnings: z.array(z.string()).optional().default([]),
+  workExperience: z.array(z.any()),
+  projects: z.array(z.any()),
 })
 
 const addProjectsResponseSchema = z.object({
-  projects: z
-    .array(
-      z.object({
-        title: z.string().default(''),
-        subtitle: z.string().optional().default(''),
-        dates: z
-          .object({
-            start: z.string().optional().default(''),
-            end: z.string().optional().default(''),
-          })
-          .default({ start: '', end: '' }),
-        description: z.unknown().optional(),
-      }),
-    )
-    .default([]),
-  notes: z.array(z.string()).optional().default([]),
+  projects: z.array(z.any()),
 })
 
 const coverLetterResponseSchema = z.object({
@@ -275,6 +276,109 @@ function estimateExperienceYears(resumeData: z.infer<typeof resumeSchema>): numb
   return years
 }
 
+// Converts resume to compact plain text for analysis actions (much fewer tokens than full JSON)
+function resumeToAnalysisText(resumeData: z.infer<typeof resumeSchema>): string {
+  const lines: string[] = []
+
+  if (resumeData.header?.fullName) lines.push(`Name: ${resumeData.header.fullName}`)
+
+  if (resumeData.summary) {
+    const txt = richTextToPlainText(resumeData.summary)
+    if (txt) lines.push(`\nSUMMARY\n${txt}`)
+  }
+
+  if (resumeData.skills?.length) {
+    lines.push('\nSKILLS')
+    for (const s of resumeData.skills) {
+      const d = richTextToPlainText(s.details)
+      const line = [s.category, d].filter(Boolean).join(': ')
+      if (line) lines.push(line)
+    }
+  }
+
+  if (resumeData.workExperience?.length) {
+    lines.push('\nWORK EXPERIENCE')
+    for (const w of resumeData.workExperience) {
+      const header = [w.jobTitle, w.employer, w.dates?.start ? `(${w.dates.start}–${w.dates.end ?? 'Present'})` : ''].filter(Boolean).join(' | ')
+      if (header) lines.push(header)
+      const desc = richTextToPlainText(w.description)
+      if (desc) lines.push(desc)
+    }
+  }
+
+  if (resumeData.projects?.length) {
+    lines.push('\nPROJECTS')
+    for (const p of resumeData.projects) {
+      if (p.title) lines.push(p.title)
+      const desc = richTextToPlainText(p.description)
+      if (desc) lines.push(desc)
+    }
+  }
+
+  if (resumeData.education?.length) {
+    lines.push('\nEDUCATION')
+    for (const e of resumeData.education) {
+      const line = [e.degree, e.school].filter(Boolean).join(', ')
+      if (line) lines.push(line)
+    }
+  }
+
+  if (resumeData.certificates?.length) {
+    lines.push('\nCERTIFICATES')
+    for (const c of resumeData.certificates) {
+      if (c.title) lines.push(c.title)
+    }
+  }
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function flatNodeText(node: unknown): string {
+  const n = node as { text?: unknown; content?: unknown[] } | null
+  if (!n) return ''
+  if (typeof n.text === 'string') return n.text
+  return ((n.content ?? []) as unknown[]).map(flatNodeText).join('')
+}
+
+// Extracts bullet points from a ProseMirror document
+function extractBullets(doc: unknown): string[] {
+  const root = doc as { type?: string; content?: unknown[] } | null
+  if (!root || root.type !== 'doc') return []
+  const bullets: string[] = []
+  const walk = (node: unknown) => {
+    const n = node as { type?: string; content?: unknown[] } | null
+    if (!n) return
+    if (n.type === 'listItem') {
+      const txt = flatNodeText(n).replace(/\s+/g, ' ').trim()
+      if (txt) bullets.push(txt)
+      return
+    }
+    for (const child of (n.content ?? [])) walk(child)
+  }
+  walk(root)
+  return bullets
+}
+
+function resumeToBulletsText(resumeData: z.infer<typeof resumeSchema>): string {
+  const lines: string[] = []
+  for (const w of resumeData.workExperience ?? []) {
+    const label = [w.jobTitle, w.employer].filter(Boolean).join(' @ ')
+    const bullets = extractBullets(w.description)
+    if (bullets.length) {
+      lines.push(`[${label}]`)
+      lines.push(...bullets.map((b) => `- ${b}`))
+    }
+  }
+  for (const p of resumeData.projects ?? []) {
+    const bullets = extractBullets(p.description)
+    if (bullets.length) {
+      lines.push(`[${p.title ?? 'Project'}]`)
+      lines.push(...bullets.map((b) => `- ${b}`))
+    }
+  }
+  return lines.join('\n')
+}
+
 async function callOpenAIEmbeddings({ inputs }: { inputs: string[] }) {
   const apiKey = process.env.OPENAI_API_KEY
   const model = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small'
@@ -392,66 +496,88 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid request' }, { status: 400 })
   }
 
-  const { action, jobDescription, resume_data } = parsed.data
+  const { action, jobDescription, resume_data, extra } = parsed.data
 
-  const resumeParsed = resumeSchema.safeParse(resume_data)
-  if (!resumeParsed.success) {
+  const resumeParsed = resume_data != null ? resumeSchema.safeParse(resume_data) : null
+  if (resumeParsed && !resumeParsed.success) {
     return NextResponse.json({ error: 'Invalid resume_data' }, { status: 400 })
   }
 
-  const resumeJson = JSON.stringify(resumeParsed.data)
+  const resumeJson = resumeParsed ? JSON.stringify(resumeParsed.data) : '{}'
   const jd = (jobDescription || '').trim()
+
+  // Slim payload helpers — only send editable sections to reduce tokens ~50%
+  function editPayload() {
+    if (!resumeParsed?.success) return '{}'
+    const d = resumeParsed.data
+    return JSON.stringify({ workExperience: d.workExperience, projects: d.projects })
+  }
+  function addProjectsPayload() {
+    if (!resumeParsed?.success) return '{}'
+    const d = resumeParsed.data
+    return JSON.stringify({
+      projects: d.projects,
+      skills: d.skills,
+      work_context: d.workExperience.map(({ id, jobTitle, employer, dates }) => ({ id, jobTitle, employer, dates })),
+    })
+  }
+  // Merge AI-returned partial arrays back onto original by id (prevents AI from dropping frozen fields)
+  function mergeByDescription<T extends { id: string; description?: unknown }>(originals: T[], aiItems: T[]): T[] {
+    return originals.map(orig => {
+      const ai = aiItems.find(a => a.id === orig.id)
+      if (!ai) return orig
+      return { ...orig, description: ai.description ?? orig.description }
+    })
+  }
 
   try {
     if (action === 'adjust') {
-      if (!jd) {
-        return NextResponse.json({ error: 'Job description is required for Adjust Resume' }, { status: 400 })
-      }
+      if (!jd) return NextResponse.json({ error: 'Job description is required for Adjust Resume' }, { status: 400 })
+      if (!resumeParsed?.success) return NextResponse.json({ error: 'resume_data is required' }, { status: 400 })
       const out = await callOpenAIJson({
         system: adjustResumePrompt,
-        user: `JOB DESCRIPTION:\n${jd}\n\nCURRENT RESUME JSON:\n${resumeJson}`,
+        user: `JOB DESCRIPTION:\n${jd}\n\nRESUME SECTIONS TO EDIT (JSON):\n${editPayload()}`,
       })
       const shaped = adjustResponseSchema.parse(out)
-      const nextResume = resumeSchema.safeParse(shaped.resume_data)
-      if (!nextResume.success) {
-        return NextResponse.json({ error: 'AI returned invalid resume_data' }, { status: 502 })
+      const merged = {
+        ...resumeParsed.data,
+        workExperience: mergeByDescription(resumeParsed.data.workExperience, shaped.workExperience),
+        projects: mergeByDescription(resumeParsed.data.projects, shaped.projects),
       }
-      return NextResponse.json({
-        resume_data: nextResume.data,
-        meta: {
-          changes: shaped.changes,
-          warnings: shaped.warnings,
-          missing_info_questions: shaped.missing_info_questions,
-        },
-      })
+      const nextResume = resumeSchema.safeParse(merged)
+      if (!nextResume.success) return NextResponse.json({ error: 'AI returned invalid resume_data' }, { status: 502 })
+      return NextResponse.json({ resume_data: nextResume.data })
     }
 
     if (action === 'optimize') {
+      if (!jd) return NextResponse.json({ error: 'Job description is required for Optimize Resume' }, { status: 400 })
+      if (!resumeParsed?.success) return NextResponse.json({ error: 'resume_data is required' }, { status: 400 })
       const out = await callOpenAIJson({
         system: optimizeResumePrompt,
-        user: `JOB DESCRIPTION (optional):\n${jd || '(none)'}\n\nCURRENT RESUME JSON:\n${resumeJson}`,
+        user: `JOB DESCRIPTION:\n${jd}\n\nRESUME SECTIONS TO EDIT (JSON):\n${editPayload()}`,
       })
       const shaped = optimizeResponseSchema.parse(out)
-      const nextResume = resumeSchema.safeParse(shaped.resume_data)
-      if (!nextResume.success) {
-        return NextResponse.json({ error: 'AI returned invalid resume_data' }, { status: 502 })
+      const merged = {
+        ...resumeParsed.data,
+        workExperience: mergeByDescription(resumeParsed.data.workExperience, shaped.workExperience),
+        projects: mergeByDescription(resumeParsed.data.projects, shaped.projects),
       }
-      return NextResponse.json({
-        resume_data: nextResume.data,
-        meta: { changes: shaped.changes, warnings: shaped.warnings },
-      })
+      const nextResume = resumeSchema.safeParse(merged)
+      if (!nextResume.success) return NextResponse.json({ error: 'AI returned invalid resume_data' }, { status: 502 })
+      return NextResponse.json({ resume_data: nextResume.data })
     }
 
     if (action === 'addProjects') {
-      if (!jd) {
-        return NextResponse.json({ error: 'Job description is required for Add AI Generated Projects' }, { status: 400 })
-      }
+      if (!jd) return NextResponse.json({ error: 'Job description is required for Add AI Generated Projects' }, { status: 400 })
+      if (!resumeParsed?.success) return NextResponse.json({ error: 'resume_data is required' }, { status: 400 })
       const out = await callOpenAIJson({
         system: addProjectsPrompt,
-        user: `JOB DESCRIPTION:\n${jd}\n\nCURRENT RESUME JSON:\n${resumeJson}`,
+        user: `JOB DESCRIPTION:\n${jd}\n\nCURRENT PROJECTS + CONTEXT (JSON):\n${addProjectsPayload()}`,
       })
       const shaped = addProjectsResponseSchema.parse(out)
-      return NextResponse.json({ projects: shaped.projects, meta: { notes: shaped.notes } })
+      const nextResume = resumeSchema.safeParse({ ...resumeParsed.data, projects: shaped.projects })
+      if (!nextResume.success) return NextResponse.json({ error: 'AI returned invalid resume_data' }, { status: 502 })
+      return NextResponse.json({ resume_data: nextResume.data })
     }
 
     if (action === 'coverLetter') {
@@ -467,9 +593,8 @@ export async function POST(request: Request) {
     }
 
     if (action === 'fit') {
-      if (!jd) {
-        return NextResponse.json({ error: 'Job description is required for Check fit' }, { status: 400 })
-      }
+      if (!jd) return NextResponse.json({ error: 'Job description is required for Check fit' }, { status: 400 })
+      if (!resumeParsed) return NextResponse.json({ error: 'resume_data is required for Check fit' }, { status: 400 })
 
       const extractedRaw = await callOpenAIJson({
         system: jobFitPrompt,
@@ -602,6 +727,128 @@ export async function POST(request: Request) {
       }
 
       return NextResponse.json({ fit: resp })
+    }
+
+    if (action === 'clHighlights') {
+      if (!jd) return NextResponse.json({ error: 'Job description is required' }, { status: 400 })
+      if (!resumeParsed) return NextResponse.json({ error: 'resume_data is required' }, { status: 400 })
+      const resumeText = resumeToAnalysisText(resumeParsed.data)
+      const out = await callOpenAIJson({
+        system: coverLetterHighlightsPrompt,
+        user: `JOB DESCRIPTION:\n${jd}\n\nRESUME:\n${resumeText}`,
+      })
+      return NextResponse.json(out)
+    }
+
+    if (action === 'clDraft') {
+      if (!jd) return NextResponse.json({ error: 'Job description is required' }, { status: 400 })
+      const { highlights = [], answers = [], questions = [] } = (extra as any) ?? {}
+      const highlightText = (highlights as Array<{ point: string; why: string }>)
+        .map((h, i) => `${i + 1}. ${h.point} — ${h.why}`)
+        .join('\n')
+      const qaText = (questions as string[])
+        .map((q, i) => `Q: ${q}\nA: ${(answers as string[])[i]?.trim() || '(no answer)'}`)
+        .join('\n\n')
+      const jdTrimmed = jd.slice(0, 1200)
+      const out = await callOpenAIJson({
+        system: coverLetterDraftPrompt,
+        user: `JOB DESCRIPTION (excerpt):\n${jdTrimmed}\n\nHIGHLIGHTS FROM RESUME:\n${highlightText}\n\nCANDIDATE MOTIVATION:\n${qaText}`,
+      })
+      return NextResponse.json(out)
+    }
+
+    if (!resumeParsed) {
+      return NextResponse.json({ error: 'resume_data is required for this action' }, { status: 400 })
+    }
+    const resumeData = resumeParsed.data
+
+    if (action === 'alignment') {
+      if (!jd) return NextResponse.json({ error: 'Job description is required for Alignment Analysis' }, { status: 400 })
+      const resumeText = resumeToAnalysisText(resumeData)
+      const out = await callOpenAIJson({
+        system: alignmentAnalysisPrompt,
+        user: `JOB DESCRIPTION:\n${jd}\n\nRESUME:\n${resumeText}`,
+      })
+      return NextResponse.json(out)
+    }
+
+    if (action === 'atsAudit') {
+      if (!jd) return NextResponse.json({ error: 'Job description is required for ATS Audit' }, { status: 400 })
+      const resumeText = resumeToAnalysisText(resumeData)
+      const out = await callOpenAIJson({
+        system: atsAuditPrompt,
+        user: `JOB DESCRIPTION:\n${jd}\n\nRESUME:\n${resumeText}`,
+      })
+      return NextResponse.json(out)
+    }
+
+    if (action === 'atsKeywords') {
+      if (!jd) return NextResponse.json({ error: 'Job description is required for ATS Keywords' }, { status: 400 })
+      const out = await callOpenAIJson({
+        system: atsKeywordsPrompt,
+        user: `JOB DESCRIPTION:\n${jd}`,
+      })
+      return NextResponse.json(out)
+    }
+
+    if (action === 'taskAudit') {
+      const bullets = resumeToBulletsText(resumeData)
+      if (!bullets.trim()) return NextResponse.json({ error: 'No bullet points found in resume' }, { status: 400 })
+      const out = await callOpenAIJson({
+        system: taskAuditPrompt,
+        user: `RESUME BULLETS:\n${bullets}`,
+      })
+      return NextResponse.json(out)
+    }
+
+    if (action === 'gapAnalysis') {
+      if (!jd) return NextResponse.json({ error: 'Job description is required for Gap Analysis' }, { status: 400 })
+      const resumeText = resumeToAnalysisText(resumeData)
+      const out = await callOpenAIJson({
+        system: gapAnalysisPrompt,
+        user: `JOB DESCRIPTION:\n${jd}\n\nRESUME:\n${resumeText}`,
+      })
+      return NextResponse.json(out)
+    }
+
+    if (action === 'howDev') {
+      const bullets = resumeToBulletsText(resumeData)
+      if (!bullets.trim()) return NextResponse.json({ error: 'No bullet points found in resume' }, { status: 400 })
+      const out = await callOpenAIJson({
+        system: howDevPrompt,
+        user: `RESUME BULLETS:\n${bullets}`,
+      })
+      return NextResponse.json(out)
+    }
+
+    if (action === 'interviewQuestions') {
+      if (!jd) return NextResponse.json({ error: 'Job description is required' }, { status: 400 })
+      const resumeText = resumeToAnalysisText(resumeData)
+      const out = await callOpenAIJson({
+        system: interviewQuestionsPrompt,
+        user: `JOB DESCRIPTION:\n${jd}\n\nRESUME:\n${resumeText}`,
+      })
+      return NextResponse.json(out)
+    }
+
+    if (action === 'questionsToAsk') {
+      if (!jd) return NextResponse.json({ error: 'Job description is required' }, { status: 400 })
+      const out = await callOpenAIJson({
+        system: questionsToAskPrompt,
+        user: `JOB DESCRIPTION:\n${jd}`,
+      })
+      return NextResponse.json(out)
+    }
+
+    if (action === 'informationalInterview') {
+      const context = ((extra as any)?.context ?? '').toString().trim()
+      const roleContext = context || jd.slice(0, 800)
+      if (!roleContext) return NextResponse.json({ error: 'Role context or job description is required' }, { status: 400 })
+      const out = await callOpenAIJson({
+        system: informationalInterviewPrompt,
+        user: `TARGET ROLE CONTEXT:\n${roleContext}`,
+      })
+      return NextResponse.json(out)
     }
 
     return NextResponse.json({ error: 'Unsupported action' }, { status: 400 })

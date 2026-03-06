@@ -64,7 +64,7 @@ export function RichTextPdf({ doc }: { doc: unknown }) {
               {items.map((li, liIdx) => {
                 const firstParagraph = li.content?.find((c) => c.type === 'paragraph')
                 return (
-                  <Text key={liIdx} style={{ fontSize: 9.5, lineHeight: 1.2, marginBottom: 2, marginHorizontal:15 }}>
+                  <Text key={liIdx} style={{ fontSize: 9.5, lineHeight: 1.2, marginBottom: 2, marginHorizontal:10 }}>
                     • {renderInline(firstParagraph?.content)}
                   </Text>
                 )
