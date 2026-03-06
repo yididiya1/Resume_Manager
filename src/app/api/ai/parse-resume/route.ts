@@ -6,29 +6,69 @@ import { resumeSchema } from '@/lib/resume/types'
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
-// pdfjs-dist (used by pdf-parse) requires browser globals that don't exist in Node.js
-// Polyfill them before any pdf-parse import/call
+// pdfjs-dist (used by pdf-parse) requires browser globals that don't exist in Node.js.
+// These stubs must be set before any pdf-parse code runs.
 function polyfillBrowserGlobals() {
   const g = globalThis as any
   if (!g.DOMMatrix) {
     g.DOMMatrix = class DOMMatrix {
-      constructor() {
-        return new Proxy(this, { get: (_t, p) => (typeof p === 'string' && p !== 'then' ? 0 : undefined) })
+      a=1;b=0;c=0;d=1;e=0;f=0
+      m11=1;m12=0;m13=0;m14=0
+      m21=0;m22=1;m23=0;m24=0
+      m31=0;m32=0;m33=1;m34=0
+      m41=0;m42=0;m43=0;m44=1
+      is2D=true;isIdentity=true
+      multiply() { return this }
+      inverse() { return this }
+      translate() { return this }
+      scale() { return this }
+      rotate() { return this }
+      transformPoint(p: any) { return p }
+    }
+  }
+  if (!g.Path2D) {
+    g.Path2D = class Path2D {
+      moveTo() {}
+      lineTo() {}
+      bezierCurveTo() {}
+      quadraticCurveTo() {}
+      arc() {}
+      rect() {}
+      closePath() {}
+      addPath() {}
+    }
+  }
+  if (!g.ImageData) {
+    g.ImageData = class ImageData {
+      width: number; height: number; data: Uint8ClampedArray
+      constructor(w: number, h: number) {
+        this.width = w; this.height = h
+        this.data = new Uint8ClampedArray(w * h * 4)
       }
     }
   }
-  if (!g.Path2D) g.Path2D = class Path2D { moveTo() {} lineTo() {} closePath() {} }
-  if (!g.ImageData) g.ImageData = class ImageData { constructor(w: number, h: number) { Object.assign(this, { width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }) } }
-  if (!g.document) g.document = { createElement: () => ({ getContext: () => null }) }
+  if (!g.CanvasRenderingContext2D) {
+    g.CanvasRenderingContext2D = class {}
+  }
+  if (!g.document) {
+    g.document = {
+      createElement: () => ({
+        getContext: () => null,
+        style: {},
+      }),
+    }
+  }
 }
 
 async function extractTextFromPdf(buffer: Buffer): Promise<string> {
   polyfillBrowserGlobals()
-  // Dynamic import avoids pdf-parse's test-file read on module init (Next.js compat)
-  const pdfParseModule = (await import('pdf-parse')) as any
-  const pdfParse = pdfParseModule.default ?? pdfParseModule
+  // Import from the internal lib path to skip pdf-parse's test-file read on module init,
+  // which throws in serverless environments. serverExternalPackages in next.config.ts
+  // ensures this is never bundled (prevents the "r is not a function" mangling error).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const pdfParse = require('pdf-parse/lib/pdf-parse.js') as (buf: Buffer) => Promise<{ text: string }>
   const result = await pdfParse(buffer)
-  return result.text
+  return result.text as string
 }
 
 async function extractTextFromDocx(buffer: Buffer): Promise<string> {
