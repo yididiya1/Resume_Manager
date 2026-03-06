@@ -17,7 +17,8 @@ export function LoginForm() {
     setIsLoading(true)
     try {
       const supabase = createSupabaseBrowserClient()
-      const redirectTo = new URL('/auth/callback', window.location.origin)
+      const origin = process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, '') ?? window.location.origin
+      const redirectTo = new URL('/auth/callback', origin)
       redirectTo.searchParams.set('next', nextPath)
       await supabase.auth.signInWithOAuth({
         provider: 'google',
