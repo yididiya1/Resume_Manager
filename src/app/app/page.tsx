@@ -15,6 +15,7 @@ import { createSupabaseServerClient } from '@/lib/supabase/server'
 import { resumeSchema } from '@/lib/resume/types'
 import { createResumeAction, deleteResumeAction } from './actions'
 import { TemplatePicker } from './TemplatePicker'
+import { UploadResume } from './UploadResume'
 import { RESUME_TEMPLATES } from '@/lib/resume/templates'
 import { FileText, MoreVertical, Pencil, Trash2 } from 'lucide-react'
 
@@ -61,6 +62,7 @@ export default async function DashboardPage() {
           </div>
           <div className="flex items-center gap-2">
             <TemplatePicker templates={RESUME_TEMPLATES} />
+            <UploadResume />
             <form action={createResumeAction}>
               <Button type="submit">Create new resume</Button>
             </form>
