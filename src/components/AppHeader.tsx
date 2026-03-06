@@ -6,7 +6,7 @@ import { usePathname } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { createSupabaseBrowserClient } from '@/lib/supabase/browser'
 import { isSupabaseConfigured } from '@/lib/supabase/isConfigured'
-import { FileText, SlidersHorizontal, Library } from 'lucide-react'
+import { FileText, SlidersHorizontal, Library, MailOpen, MessageSquare } from 'lucide-react'
 
 export function AppHeader() {
   const pathname = usePathname()
@@ -26,6 +26,8 @@ export function AppHeader() {
   const items = [
     { href: '/app', label: 'Resumes', icon: FileText },
     { href: '/adjuster', label: 'Adjuster', icon: SlidersHorizontal },
+    { href: '/cover-letter', label: 'Cover Letter', icon: MailOpen },
+    { href: '/interview', label: 'Interview', icon: MessageSquare },
     { href: '/content', label: 'Content', icon: Library },
   ]
 
